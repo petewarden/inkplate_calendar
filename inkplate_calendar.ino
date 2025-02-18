@@ -61,7 +61,7 @@ typedef enum
 class Button
 {
 public:
-  Button(int left, int top, int width, int height, const char *name, IconType icon) : left(left), top(top), width(width), height(height), name(name), icon(icon) {}
+  Button(int left, int top, int width, int height, const char *name, IconType icon) : left(left), top(top), width(width), height(height), name(name), icon(icon), pressed(false), pressStartTime(-1) {}
 
   Button(const Button &other)
   {
@@ -71,36 +71,18 @@ public:
     this->height = other.height;
     this->name = other.name;
     this->icon = other.icon;
+    this->pressed = other.pressed;
+    this->pressStartTime = other.pressStartTime;
   }
 
-  int area() { return this->width * this->height; }
-
-  void expandToContain(const Button &other)
+  bool contains(int x, int y)
   {
-    if (other.left < this->left)
-    {
-      this->left = other.left;
-    }
-    if (other.top < this->top)
-    {
-      this->top = other.top;
-    }
-
-    const int thisRight = this->left + this->width;
-    const int otherRight = other.left + other.width;
-    if (otherRight > thisRight)
-    {
-      const int delta = otherRight - thisRight;
-      this->width += delta;
-    }
-
-    const int thisBottom = this->top + this->height;
-    const int otherBottom = other.top + other.height;
-    if (otherBottom > thisBottom)
-    {
-      const int delta = otherBottom - thisBottom;
-      this->height += delta;
-    }
+    return (
+      (x >= this->left) &&
+      (y >= this->top) &&
+      (x < (this->left + this->width)) &&
+      (x < (this->top + this->height))
+    );
   }
 
   int left;
@@ -109,6 +91,8 @@ public:
   int height;
   const char *name;
   IconType icon;
+  bool pressed;
+  int32_t pressStartTime;
 };
 
 typedef struct STouchData
@@ -157,6 +141,7 @@ bool popTailTouchBuffer(TouchData *touch);
 void testTouchBuffer();
 void printTouchBuffer();
 void etchASketch();
+void onButtonClick(const Button& button, const TouchData& touch);
 
 Inkplate display(INKPLATE_1BIT); // Create an object on Inkplate library and also set library into 1-bit mode (BW)
 
@@ -265,8 +250,8 @@ void setup()
 void loop()
 {
   // Serial.println("loop() start");
-  // drawSetDate();
-  etchASketch();
+  drawSetDate();
+  // etchASketch();
 }
 
 void etchASketch()
@@ -333,30 +318,8 @@ bool tsGetData(TouchData *outTouch)
   int yRaw;
   tsGetXY((_raw + 1) + (fingerIndex * 3), &xRaw, &yRaw);
 
-  // Serial.print("xRaw = ");
-  // Serial.println(xRaw);
-  // Serial.print("yRaw = ");
-  // Serial.println(yRaw);
-
-  // switch (display.getRotation())
-  // {
-  // case 0:
   outTouch->y = E_INK_HEIGHT - 1 - ((xRaw * E_INK_HEIGHT - 1) / _tsXResolution);
   outTouch->x = ((yRaw * E_INK_WIDTH - 1) / _tsYResolution);
-  //     break;
-  // case 1:
-  // outTouch->x = E_INK_HEIGHT - 1 - ((xRaw * E_INK_HEIGHT - 1) / tsXResolution);
-  // outTouch->y = E_INK_WIDTH - 1 - ((yRaw * E_INK_WIDTH - 1) / tsYResolution);
-  //     break;
-  // case 2:
-  // outTouch->y = ((xRaw * E_INK_HEIGHT - 1) / tsXResolution);
-  // outTouch->x = E_INK_WIDTH - 1 - ((yRaw * E_INK_WIDTH - 1) / tsYResolution);
-  //     break;
-  // case 3:
-  // outTouch->x = ((xRaw * E_INK_HEIGHT - 1) / tsXResolution);
-  // outTouch->y = ((yRaw * E_INK_WIDTH - 1) / tsYResolution);
-  //     break;
-  // }
 
   return true;
 }
@@ -374,34 +337,6 @@ void touchscreenWorker(void *pvParameters)
       newTouch.time = millis();
       pushHeadTouchBuffer(newTouch);
     }
-
-    // uint8_t rawData[8];
-    // display.tsGetRawData(rawData);
-    // bool allZeros = true;
-    // for (int i = 0; i < 8; ++i)
-    // {
-    //   if (rawData[i] != 0)
-    //   {
-    //     allZeros = false;
-    //   }
-    // }
-    // if (!allZeros) {
-    //   for (int i = 0; i < 8; ++i)
-    //   {
-    //     printToNDigits(rawData[i], 2, '0', HEX);
-    //   }
-    //   Serial.print("\n");
-    // }
-
-    // TouchData touch;
-    // uint16_t xPos[2];
-    // uint16_t yPos[2];
-    // int fingers = display.tsGetData(xPos, yPos);
-    // touch.x = xPos[0];
-    // touch.y = yPos[0];
-    // touch.lifted = ((fingers == 0) && (xPos[0] == 0) && (yPos[0] == (display.height() - 1)));
-    // touch.time = millis();
-    // pushHeadTouchBuffer(touch);
   }
 }
 
@@ -751,11 +686,6 @@ void drawCurrentTime()
   display.display();
 }
 
-bool didTouchButton(const Button &button)
-{
-  return (display.touchInArea(button.left, button.top, button.width, button.height));
-}
-
 void drawButton(const Button &button)
 {
   const int left = button.left;
@@ -793,37 +723,136 @@ void drawButton(const Button &button)
 
 void drawSetDate()
 {
-  // display.setTextColor(WHITE, BLACK);
-  // display.fillRect(0, 0, display.width(), display.height(), BLACK);
+  display.setTextColor(WHITE, BLACK);
+  display.fillRect(0, 0, display.width(), display.height(), BLACK);
 
-  // display.rtcGetRtcData();
+  display.rtcGetRtcData();
 
-  // display.setCursor(110, 60);
-  // display.setTextSize(8);
-  // display.print("Set Date");
+  display.setCursor(110, 60);
+  display.setTextSize(8);
+  display.print("Set Date");
 
-  // display.rtcGetRtcData();
+  display.rtcGetRtcData();
+
+  while (true)
+  {
+    TouchData touch;
+    const bool touchFound = popTailTouchBuffer(&touch);
+    if (!touchFound)
+    {
+      break;
+    }
+    
+    if (!touch.lifted)
+    {
+      for (int i = 0; i < g_settings_buttons_count; ++i)
+      {
+        Button &button = g_settings_buttons[i];
+        if (button.contains(touch.x, touch.y))
+        {
+          if (!button.pressed)
+          {
+            button.pressed = true;
+            button.pressStartTime = touch.time;
+            onButtonClick(button, touch);
+          }
+          else
+          {
+            int lastTouchTime = g_previous_touch.time - button.pressStartTime;
+            int thisTouchTime = touch.time - button.pressStartTime;
+            constexpr int startDelay = 1000;
+            constexpr int repeatTime = 500;
+            if (thisTouchTime > startDelay)
+            {
+              int lastRepeatIndex = (lastTouchTime - startDelay) / repeatTime;
+              if (lastRepeatIndex < 0)
+              {
+                lastRepeatIndex = 0;
+              }
+              int thisRepeatIndex = (thisTouchTime - startDelay) / repeatTime;
+              for (int j = lastRepeatIndex; j < thisRepeatIndex; ++j)
+              {
+                onButtonClick(button, touch);
+              }
+            }
+          }
+        }
+      }
+    }
+    g_previous_touch = touch;
+  }
+
+  display.setCursor(60, 300);
+  display.setTextSize(8);
+  displayToNDigits(display.rtcGetMonth(), 2, '0');
+  display.print("/");
+  displayToNDigits(display.rtcGetDay(), 2, '0');
+  display.print("/");
+  displayToNDigits(display.rtcGetYear(), 4, '0');
 
   for (int i = 0; i < g_settings_buttons_count; ++i)
   {
     const Button &button = g_settings_buttons[i];
-    if (didTouchButton(button))
-    {
-      Serial.print("Touched button ");
-      Serial.println(button.name);
-    }
-    // drawButton(button);
+    drawButton(button);
   }
 
-  // display.setCursor(60, 300);
-  // display.setTextSize(8);
-  // displayToNDigits(display.rtcGetMonth(), 2, '0');
-  // display.print("/");
-  // displayToNDigits(display.rtcGetDay(), 2, '0');
-  // display.print("/");
-  // displayToNDigits(display.rtcGetYear(), 4, '0');
+  display.partialUpdate(false, false);
+}
 
-  // display.partialUpdate(false, false);
+int mod(int x, int mod)
+{
+  return (x + mod) % mod;
+}
+
+void onButtonClick(const Button& button, const TouchData& touch)
+{
+  int weekday = display.rtcGetWeekday();
+  int day = display.rtcGetDay();
+  int month = display.rtcGetMonth();
+  int year = display.rtcGetYear();
+  Serial.print("Start year = ");
+  Serial.println(year);
+
+  Serial.print("onButtonClick: ");
+  Serial.println(button.name);
+
+  if (strcmp(button.name, "month_up") == 0)
+  {
+    month += 1;
+  } 
+  else if (strcmp(button.name, "month_down") == 0)
+  {
+    month -= 1;
+  }
+  else if (strcmp(button.name, "day_up") == 0)
+  {
+    day += 1;
+  }
+  else if (strcmp(button.name, "day_down") == 0)
+  {
+    day -= 1;
+  }
+  else if (strcmp(button.name, "year_up") == 0)
+  {
+    year += 1;
+  }
+  else if (strcmp(button.name, "year_down") == 0)
+  {
+    year -= 1;
+  } 
+  else
+  {
+    Serial.print("Unknown button ");
+    Serial.println(button.name);
+  }
+
+  month = mod(month, 12);
+  day = mod(day, 31);
+
+  Serial.print("End year = ");
+  Serial.println(year);
+
+  display.rtcSetDate(weekday, day, month, year - 2000);
 }
 
 void displayToNDigits(uint8_t _d, int n, char pad, int base)
