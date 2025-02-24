@@ -50,12 +50,18 @@
     }                                                                          \
   } while (false)
 
-#define DEFAULT_SLEEP_TIME (5 * 60 * 1000 * 1000)
+#define LOG_INT(x) do { \
+  Serial.print(#x " = "); \
+  Serial.println((x)); \
+} while (false)
+
+#define DEFAULT_SLEEP_TIME (1 * 60 * 1000 * 1000)
 
 typedef enum
 {
   UP_ARROW,
-  DOWN_ARROW
+  DOWN_ARROW,
+  OK_BUTTON,
 } IconType;
 
 class Button
@@ -75,13 +81,18 @@ public:
     this->pressStartTime = other.pressStartTime;
   }
 
-  bool contains(int x, int y)
+  bool contains(int x, int y, int margin = 0)
   {
+    const int left = this->left - margin;
+    const int right = left + this->width + (margin * 2);
+    const int top = this->top - margin;
+    const int bottom = top + this->height + (margin * 2);
+
     return (
-      (x >= this->left) &&
-      (y >= this->top) &&
-      (x < (this->left + this->width)) &&
-      (x < (this->top + this->height))
+      (x >= left) &&
+      (y >= top) &&
+      (x < right) &&
+      (y < bottom)
     );
   }
 
@@ -133,15 +144,20 @@ typedef struct STouchData
   }
 } TouchData;
 
-void displayToNDigits(uint8_t _d, int n, char pad = ' ', int base = DEC);
-void printToNDigits(uint8_t _d, int n, char pad = ' ', int base = DEC);
+void displayToNDigits(int32_t d, int n, char pad = ' ', int base = DEC);
+void printToNDigits(int32_t d, int n, char pad = ' ', int base = DEC);
+void initializeTouchscreen();
 void touchscreenWorker(void *pvParameters);
 void pushHeadTouchBuffer(const TouchData *touch);
 bool popTailTouchBuffer(TouchData *touch);
 void testTouchBuffer();
 void printTouchBuffer();
-void etchASketch();
+void handleTouchEvents(Button* buttons, int buttonsCount);
 void onButtonClick(const Button& button, const TouchData& touch);
+void etchASketch();
+void drawSettings();
+const char* weekday(int year, int month, int day);
+int getMonthLength(int month, int year);
 
 Inkplate display(INKPLATE_1BIT); // Create an object on Inkplate library and also set library into 1-bit mode (BW)
 
@@ -149,15 +165,20 @@ int g_previous_battery_percentage = 0;
 int g_previous_month = 0;
 int g_previous_day = 0;
 
-bool g_button_wake_up = false;
-
 Button g_settings_buttons[] = {
-    {60, 240, 100, 40, "month_up", UP_ARROW},
-    {60, 370, 100, 40, "month_down", DOWN_ARROW},
-    {200, 240, 100, 40, "day_up", UP_ARROW},
-    {200, 370, 100, 40, "day_down", DOWN_ARROW},
-    {400, 240, 100, 40, "year_up", UP_ARROW},
-    {400, 370, 100, 40, "year_down", DOWN_ARROW},
+    {60, 20, 85, 40, "month_up", UP_ARROW},
+    {60, 150, 85, 40, "month_down", DOWN_ARROW},
+    {205, 20, 85, 40, "day_up", UP_ARROW},
+    {205, 150, 85, 40, "day_down", DOWN_ARROW},
+    {400, 20, 85, 40, "year_up", UP_ARROW},
+    {400, 150, 85, 40, "year_down", DOWN_ARROW},
+    {160, 250, 85, 40, "hour_up", UP_ARROW},
+    {160, 380, 85, 40, "hour_down", DOWN_ARROW},
+    {300, 250, 85, 40, "minute_up", UP_ARROW},
+    {300, 380, 85, 40, "minute_down", DOWN_ARROW},
+    {400, 250, 85, 40, "ampm_toggle", UP_ARROW},
+    {400, 380, 85, 40, "ampm_toggle", DOWN_ARROW},
+    {200, 450, 200, 100, "ok_button", OK_BUTTON},
 };
 const size_t g_settings_buttons_count = sizeof(g_settings_buttons) / sizeof(g_settings_buttons[0]);
 
@@ -179,78 +200,53 @@ void setup()
   Serial.begin(115200);
   display.begin(); // Init Inkplate library (you should call this function ONLY ONCE)
 
-  delay(1000);
+  esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
+  Serial.print("wakeup_reason = ");
+  Serial.println(wakeup_reason);
+  const bool isButtonWakeup = (wakeup_reason == ESP_SLEEP_WAKEUP_EXT0);
 
-  const int retryCount = 10;
-  for (int i = 0; i < retryCount; ++i)
+  if (isButtonWakeup)
   {
-    if (display.tsInit(true))
-    {
-      Serial.println("Touchscreen init ok");
-      break;
-    }
-    else
-    {
-      Serial.println("Touchscreen init fail");
-      if (i < (retryCount - 1))
-      {
-        delay(200);
-      }
-      else
-      {
-        Serial.println("All touchscreen inits failed, restarting");
-        ESP.restart();
-      }
-    }
+    display.frontlight(true);
   }
-
-  g_touch_buffer_semaphore = xSemaphoreCreateMutexStatic(&g_touch_buffer_mutex_buffer);
-  g_previous_touch.clear();
-  // testTouchBuffer();
-  xTaskCreate(
-      touchscreenWorker,  /* Task function. */
-      "touchscreen_task", /* name of task. */
-      10000,              /* Stack size of task */
-      NULL,               /* parameter of the task */
-      1,                  /* priority of the task */
-      &g_touchscreen_task /* Task handle to keep track of created task */
-  );
 
   // Make sure we can wake up with the side button.
   CHECK_OK(esp_sleep_enable_ext0_wakeup(GPIO_NUM_36, 0));
 
-  if (!display.rtcIsSet()) // Check if RTC is already is set. If ts not, set time and date
+  if (isButtonWakeup || !display.rtcIsSet())
   {
-    //  display.setTime(hour, minute, sec);
-    display.rtcSetTime(12, 05, 00); // 24H mode, ex. 13:30:00
-    //  display.setDate(weekday, day, month, yr);
-    display.rtcSetDate(5, 15, 2, 2025); // 0 for Monday, ex. Monday, 17.7.2023.
-
-    // display.rtcSetEpoch(1589610300); // Or use epoch for setting the time and date
+    initializeTouchscreen();
+    g_previous_touch.lifted = true;
   }
-
-  esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
-
-  g_button_wake_up = (wakeup_reason == ESP_SLEEP_WAKEUP_EXT0);
-
-  if (!g_button_wake_up)
+  else
   {
+    drawCurrentTime();
+    const int hour = display.rtcGetHour();
+    const int minute = display.rtcGetMinute();
+    // Needs to be 64-bit because the sleep time is expressed in microseconds.
+    uint64_t secondsToSleep;
+    if (hour < 12)
+    {
+      const uint64_t hoursToSleep = 11 - hour;
+      const uint64_t minutesToSleep = 60 - minute;
+      secondsToSleep = (60 * 60 * hoursToSleep) + (60 * minutesToSleep) + 30;
+    }
+    else
+    {
+      const uint64_t hoursToSleep = 23 - hour;
+      const uint64_t minutesToSleep = 60 - minute;
+      secondsToSleep = (60 * 60 * hoursToSleep) + (60 * minutesToSleep) + 30;
+    }
+    LOG_INT(secondsToSleep);
+    CHECK_OK(esp_sleep_enable_timer_wakeup(secondsToSleep * (1000 * 1000)));
     display.frontlight(false);
-    drawCurrentTime(); // Display current time and date
-    CHECK_OK(esp_sleep_enable_timer_wakeup(DEFAULT_SLEEP_TIME));
     esp_deep_sleep_start();
   }
-
-  display.frontlight(true);
-  display.fillRect(0, 0, display.width(), display.height(), WHITE);
-  display.partialUpdate(false, false);
-  g_previous_touch.lifted = true;
 }
 
 void loop()
 {
-  // Serial.println("loop() start");
-  drawSetDate();
+  drawSettings();
   // etchASketch();
 }
 
@@ -278,6 +274,28 @@ void etchASketch()
   {
     display.partialUpdate(false, false);
   }
+}
+
+void initializeTouchscreen()
+{
+  while (!display.tsInit(true))
+  {
+    delay(100);
+  }
+  
+  Serial.println("Touchscreen init ok");
+
+  g_touch_buffer_semaphore = xSemaphoreCreateMutexStatic(&g_touch_buffer_mutex_buffer);
+  g_previous_touch.clear();
+  // testTouchBuffer();
+  xTaskCreate(
+      touchscreenWorker,  /* Task function. */
+      "touchscreen_task", /* name of task. */
+      10000,              /* Stack size of task */
+      NULL,               /* parameter of the task */
+      1,                  /* priority of the task */
+      &g_touchscreen_task /* Task handle to keep track of created task */
+  );
 }
 
 void tsGetXY(uint8_t *_d, int *x, int *y)
@@ -620,10 +638,14 @@ void printTouchBuffer()
 void drawCurrentTime()
 {
   display.setTextColor(WHITE, BLACK);
+  display.setTextWrap(false);
 
   display.fillRect(0, 0, display.width(), display.height(), BLACK);
 
   display.rtcGetRtcData();
+
+  Serial.print("display.battery.soc() = ");
+  Serial.println(display.battery.soc());
 
   const int batteryPercentage = ((display.battery.soc() * 100) + 32768) / 65536;
 
@@ -637,23 +659,24 @@ void drawCurrentTime()
   g_previous_day = display.rtcGetDay();
   g_previous_battery_percentage = batteryPercentage;
 
-  display.setCursor(20, 20);
+  display.setCursor(30, 20);
   display.setTextSize(8);
-  const char *const days[7] = {
-      "Monday",
-      "Tuesday",
-      "Wednesday",
-      "Thursday",
-      "Friday",
-      "Saturday",
-      "Sunday",
-  };
-  display.print(days[display.rtcGetWeekday()]);
+  display.print(weekday(display.rtcGetYear(), display.rtcGetMonth() + 1, display.rtcGetDay() + 1));
 
-  display.setCursor(20, 105);
+  display.setCursor(510, 70);
+  display.setTextSize(4);
+  if (display.rtcGetHour() < 12)
+  {
+    display.print("AM");
+  }
+  else
+  {
+    display.print("PM");
+  }
+
+  display.setCursor(30, 105);
   display.setTextSize(8);
-  const char *const months[13] = {
-      "",
+  const char *const months[12] = {
       "January",
       "February",
       "March",
@@ -669,9 +692,9 @@ void drawCurrentTime()
   };
   display.print(months[display.rtcGetMonth()]);
 
-  display.setCursor(10, 200);
+  display.setCursor(30, 200);
   display.setTextSize(48);
-  displayToNDigits(display.rtcGetDay(), 2);
+  displayToNDigits(display.rtcGetDay() + 1, 2);
 
   display.setCursor(500, 30);
   display.setTextSize(3);
@@ -712,6 +735,16 @@ void drawButton(const Button &button)
   }
   break;
 
+  case OK_BUTTON:
+  {
+    display.fillRect(left, top, width, height, WHITE);
+    display.setTextColor(BLACK, WHITE);
+    display.setCursor(center_x - 40, center_y - 30);
+    display.setTextSize(8);
+    display.print("OK");
+  }
+  break;
+
   default:
   {
     // Should never get here.
@@ -721,19 +754,8 @@ void drawButton(const Button &button)
   }
 }
 
-void drawSetDate()
+void handleTouchEvents(Button* buttons, int buttonsCount)
 {
-  display.setTextColor(WHITE, BLACK);
-  display.fillRect(0, 0, display.width(), display.height(), BLACK);
-
-  display.rtcGetRtcData();
-
-  display.setCursor(110, 60);
-  display.setTextSize(8);
-  display.print("Set Date");
-
-  display.rtcGetRtcData();
-
   while (true)
   {
     TouchData touch;
@@ -743,21 +765,36 @@ void drawSetDate()
       break;
     }
     
-    if (!touch.lifted)
+    LOG_INT(touch.x);
+    LOG_INT(touch.y);
+
+    if (touch.lifted)
     {
-      for (int i = 0; i < g_settings_buttons_count; ++i)
+      for (int i = 0; i < buttonsCount; ++i)
       {
-        Button &button = g_settings_buttons[i];
-        if (button.contains(touch.x, touch.y))
+        Button &button = buttons[i];
+        button.pressed = false;
+      }
+    }
+    else
+    {
+      bool anyHit = false;
+      for (int i = 0; i < buttonsCount; ++i)
+      {
+        Button &button = buttons[i];
+        if (button.contains(touch.x, touch.y, 10))
         {
+          anyHit = true;
           if (!button.pressed)
           {
+            Serial.println("Button not pressed");
             button.pressed = true;
             button.pressStartTime = touch.time;
             onButtonClick(button, touch);
           }
           else
           {
+            Serial.println("Button pressed");
             int lastTouchTime = g_previous_touch.time - button.pressStartTime;
             int thisTouchTime = touch.time - button.pressStartTime;
             constexpr int startDelay = 1000;
@@ -778,17 +815,69 @@ void drawSetDate()
           }
         }
       }
+      if (!anyHit)
+      {
+        Serial.println("No button hit");
+        display.fillCircle(touch.x, touch.y, 20, BLACK);
+        display.fillCircle(touch.x, touch.y, 15, WHITE);
+      }
     }
     g_previous_touch = touch;
   }
+}
 
-  display.setCursor(60, 300);
+void drawSettings()
+{
+  display.setTextColor(WHITE, BLACK);
+  display.fillRect(0, 0, display.width(), display.height(), BLACK);
+
+  handleTouchEvents(g_settings_buttons, g_settings_buttons_count);
+
+  display.rtcGetRtcData();
+
+  display.setCursor(60, 80);
   display.setTextSize(8);
-  displayToNDigits(display.rtcGetMonth(), 2, '0');
+  displayToNDigits(display.rtcGetMonth() + 1, 2, '0');
   display.print("/");
-  displayToNDigits(display.rtcGetDay(), 2, '0');
+  displayToNDigits(display.rtcGetDay() + 1, 2, '0');
   display.print("/");
+
   displayToNDigits(display.rtcGetYear(), 4, '0');
+
+  const int hour24 = display.rtcGetHour();
+  int hour12;
+  const char* timeSuffix;
+  if (hour24 < 11)
+  {
+      if (hour24 == 0)
+      {
+        hour12 = 12;
+      }
+      else
+      {
+        hour12 = hour24;
+      }
+      timeSuffix = "AM";
+  }
+  else
+  {
+      if (hour24 == 12)
+      {
+        hour12 = 12;
+      }
+      else
+      {
+        hour12 = hour24 - 12;
+      }
+      timeSuffix = "PM";
+  }
+
+  display.setCursor(160, 310);
+  display.setTextSize(8);
+  displayToNDigits(hour12, 2, '0');
+  display.print(":");
+  displayToNDigits(display.rtcGetMinute(), 2, '0');
+  display.print(timeSuffix);
 
   for (int i = 0; i < g_settings_buttons_count; ++i)
   {
@@ -810,11 +899,9 @@ void onButtonClick(const Button& button, const TouchData& touch)
   int day = display.rtcGetDay();
   int month = display.rtcGetMonth();
   int year = display.rtcGetYear();
-  Serial.print("Start year = ");
-  Serial.println(year);
-
-  Serial.print("onButtonClick: ");
-  Serial.println(button.name);
+  int hour = display.rtcGetHour();
+  int minute = display.rtcGetMinute();
+  bool restart = false;
 
   if (strcmp(button.name, "month_up") == 0)
   {
@@ -840,6 +927,30 @@ void onButtonClick(const Button& button, const TouchData& touch)
   {
     year -= 1;
   } 
+  else if (strcmp(button.name, "hour_up") == 0)
+  {
+    hour += 1;
+  }
+  else if (strcmp(button.name, "hour_down") == 0)
+  {
+    hour -= 1;
+  } 
+  else if (strcmp(button.name, "minute_up") == 0)
+  {
+    minute += 1;
+  }
+  else if (strcmp(button.name, "minute_down") == 0)
+  {
+    minute -= 1;
+  } 
+  else if (strcmp(button.name, "ampm_toggle") == 0)
+  {
+    hour += 12;
+  }
+  else if (strcmp(button.name, "ok_button") == 0)
+  {
+    restart = true;
+  }
   else
   {
     Serial.print("Unknown button ");
@@ -847,15 +958,21 @@ void onButtonClick(const Button& button, const TouchData& touch)
   }
 
   month = mod(month, 12);
-  day = mod(day, 31);
+  day = mod(day, getMonthLength(month, year));
+  hour = mod(hour, 24);
+  minute = mod(minute, 60);
 
-  Serial.print("End year = ");
-  Serial.println(year);
+  display.rtcSetDate(weekday, day, month, year);
+  display.rtcSetTime(hour, minute, 0);
 
-  display.rtcSetDate(weekday, day, month, year - 2000);
+  if (restart)
+  {
+    drawCurrentTime();
+    ESP.restart();
+  }
 }
 
-void displayToNDigits(uint8_t _d, int n, char pad, int base)
+void displayToNDigits(int32_t d, int n, char pad, int base)
 {
   int limit = base;
   for (int i = 0; i < (n - 2); ++i)
@@ -865,14 +982,14 @@ void displayToNDigits(uint8_t _d, int n, char pad, int base)
 
   for (int i = (n - 1); i > 0; --i)
   {
-    if (_d < limit)
+    if (d < limit)
       display.print(pad);
     limit = (limit / base);
   }
-  display.print(_d, base);
+  display.print(d, base);
 }
 
-void printToNDigits(uint8_t _d, int n, char pad, int base)
+void printToNDigits(int32_t d, int n, char pad, int base)
 {
   int limit = base;
   for (int i = 0; i < (n - 2); ++i)
@@ -882,9 +999,66 @@ void printToNDigits(uint8_t _d, int n, char pad, int base)
 
   for (int i = (n - 1); i > 0; --i)
   {
-    if (_d < limit)
+    if (d < limit)
       Serial.print(pad);
     limit = (limit / base);
   }
-  Serial.print(_d, base);
+  Serial.print(d, base);
+}
+
+// See https://stackoverflow.com/questions/6054016/c-program-to-find-day-of-week-given-date
+const char *weekday(int year, int month, int day) {
+  /* using C99 compound literals in a single line: notice the splicing */
+  return ((const char *[])                                         \
+          {"Monday", "Tuesday", "Wednesday",                       \
+           "Thursday", "Friday", "Saturday", "Sunday"})[           \
+      (                                                            \
+          day                                                      \
+        + ((153 * (month + 12 * ((14 - month) / 12) - 3) + 2) / 5) \
+        + (365 * (year + 4800 - ((14 - month) / 12)))              \
+        + ((year + 4800 - ((14 - month) / 12)) / 4)                \
+        - ((year + 4800 - ((14 - month) / 12)) / 100)              \
+        + ((year + 4800 - ((14 - month) / 12)) / 400)              \
+        - 32045                                                    \
+      ) % 7];
+}
+
+bool isLeapYear(int year)
+{
+  // If a year is multiple of 400, 
+  // then it is a leap year 
+  if (year % 400 == 0) 
+      return true; 
+
+  // Else If a year is multiple of 100, 
+  // then it is not a leap year 
+  else if (year % 100 == 0) 
+      return false; 
+
+  // Else If a year is multiple of 4, 
+  // then it is a leap year 
+  else if (year % 4 == 0) 
+      return true; 
+  // if no above condition is satisfied, then it is not 
+  // a leap year 
+  return false; 
+}
+
+// Month is zero-based: January is 0, February is 1, etc.
+int getMonthLength(int month, int year)
+{
+  if (month > 11)
+  {
+    Serial.println("Month too high");
+    return 31;
+  }
+  const int monthLengths[] = {
+    31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31,
+  };
+  int result = monthLengths[month];
+  if ((month == 1) && isLeapYear(year))
+  {
+    result += 1;
+  }
+  return result;
 }
